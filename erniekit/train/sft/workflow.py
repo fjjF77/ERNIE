@@ -12,14 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-""" Training Ernie Model. """
+"""Training Ernie Model."""
 
 import gc
 import importlib.util
+import json
 import math
 import os
 import time
-import json
 from functools import partial
 
 if importlib.util.find_spec("triton") is not None:
@@ -27,7 +27,7 @@ if importlib.util.find_spec("triton") is not None:
         import use_triton_in_paddle
 
         use_triton_in_paddle.make_triton_compatible_with_paddle()
-    except:
+    except Exception:
         raise RuntimeError(
             "Triton is installed, but not yet compatible with Paddle. "
             "Please run 'python -m pip install use-triton-in-paddle' to enable Triton support in Paddle."
@@ -56,7 +56,12 @@ from ernie.utils.common_utils import (
     save_stop_info,
 )
 
-from ...hparams import DataArguments, FinetuningArguments, GeneratingArguments, ModelArguments
+from ...hparams import (
+    DataArguments,
+    FinetuningArguments,
+    GeneratingArguments,
+    ModelArguments,
+)
 from .trainer import ErnieMoETrainer
 
 
@@ -84,8 +89,11 @@ def run_sft(
         if finetuning_args.pipeline_parallel_degree > 1:
             assert (
                 hasattr(finetuning_args, "pipeline_parallel_config")
-                and "disable_partial_send_recv" in finetuning_args.pipeline_parallel_config
-            ), "Should set '--pipeline_parallel_config disable_partial_send_recv' in bash script for pp with sp."
+                and "disable_partial_send_recv"
+                in finetuning_args.pipeline_parallel_config
+            ), (
+                "Should set '--pipeline_parallel_config disable_partial_send_recv' in bash script for pp with sp."
+            )
         if finetuning_args.tensor_parallel_degree <= 1:
             finetuning_args.sequence_parallel = False
             logger.info("Tensor_parallel_degree = 1. Set sequence_parallel to False.")
@@ -93,12 +101,12 @@ def run_sft(
         model_args.fuse_linear = False
         logger.info("LoRA does not support fuse_linear. Set fuse_linear to False.")
     if finetuning_args.recompute and model_args.offload_recompute_inputs:
-        assert (
-            model_args.recompute_use_reentrant
-        ), "offload_recompute_inputs can only be enabled along with reentrant recompute."
-        assert (
-            model_args.recompute_granularity == "full"
-        ), "To save device memory, please try higher recompute_granularity before enabling offload_recompute_inputs."
+        assert model_args.recompute_use_reentrant, (
+            "offload_recompute_inputs can only be enabled along with reentrant recompute."
+        )
+        assert model_args.recompute_granularity == "full", (
+            "To save device memory, please try higher recompute_granularity before enabling offload_recompute_inputs."
+        )
         if finetuning_args.pipeline_parallel_degree > 1:
             logger.debug(
                 "offload_recompute_inputs is not supported in pipeline parallel. Set offload_recompute_inputs to False."
@@ -116,7 +124,11 @@ def run_sft(
                 finetuning_args.release_grads = False
 
     # checkpoint O1 quantization is open by default.
-    if not finetuning_args.disable_ckpt_quant and finetuning_args.ckpt_quant_stage == "O0" and not model_args.lora:
+    if (
+        not finetuning_args.disable_ckpt_quant
+        and finetuning_args.ckpt_quant_stage == "O0"
+        and not model_args.lora
+    ):
         finetuning_args.ckpt_quant_stage = "O1"
     elif finetuning_args.disable_ckpt_quant:
         finetuning_args.ckpt_quant_stage = "O0"
@@ -155,22 +167,32 @@ def run_sft(
         and not finetuning_args.overwrite_output_dir
     ):
         uc_async_save = (
-            finetuning_args.unified_checkpoint and "async_save" in finetuning_args.unified_checkpoint_config
+            finetuning_args.unified_checkpoint
+            and "async_save" in finetuning_args.unified_checkpoint_config
         )
         last_checkpoint = get_last_checkpoint(
             finetuning_args.output_dir,
             signal_folder=finetuning_args.output_signal_dir,
             uc_async_save=uc_async_save,
         )
-        if last_checkpoint is not None and finetuning_args.resume_from_checkpoint is None:
+        if (
+            last_checkpoint is not None
+            and finetuning_args.resume_from_checkpoint is None
+        ):
             logger.info(
                 f"Checkpoint detected, resuming training at {last_checkpoint}. To avoid this behavior, change "
                 "the `--output_dir` or add `--overwrite_output_dir` to train from scratch."
             )
 
-    if last_checkpoint is not None and model_args.continue_training and not model_args.lora:
+    if (
+        last_checkpoint is not None
+        and model_args.continue_training
+        and not model_args.lora
+    ):
         model_args.continue_training = False
-        logger.info(f"Checkpoint detected, resuming training at {last_checkpoint}. Set `continue_training` to False.")
+        logger.info(
+            f"Checkpoint detected, resuming training at {last_checkpoint}. Set `continue_training` to False."
+        )
 
     # Set the dtype for loading model
     dtype = paddle.get_default_dtype()
@@ -183,16 +205,46 @@ def run_sft(
     logger.info("Start to load model ...")
 
     # Detect torch model.
-    config_path = os.path.join(model_args.model_name_or_path, "config.json")
-    with open(config_path, "r", encoding="utf-8") as f:
-        config_dict = json.load(f)
-    if "torch_dtype" in config_dict:
-        raise ValueError("Unsupported weight format: Torch weights are not compatible with Paddle model currently.")
+    is_local = os.path.isfile(model_args.model_name_or_path) or os.path.isdir(
+        model_args.model_name_or_path
+    )
+    if is_local:
+        config_path = os.path.join(model_args.model_name_or_path, "config.json")
+        with open(config_path, "r", encoding="utf-8") as f:
+            config_dict = json.load(f)
+        if "torch_dtype" in config_dict:
+            raise ValueError(
+                "Unsupported weight format: Torch weights are not compatible with Paddle model currently."
+            )
+
+    # convert paddle model repo id
+    if getattr(model_args, "from_aistudio", False):
+        if not is_local and model_args.model_name_or_path.startswith("baidu"):
+            model_args.model_name_or_path = model_args.model_name_or_path.replace(
+                "baidu", "PaddlePaddle"
+            )
+            logger.warning(
+                f"The repo id of baidu's model in the aistudio should be 'PaddlePaddle', model_name_or_path has changed to {model_args.model_name_or_path}"
+            )
+    elif getattr(model_args, "from_modelscope", False):
+        os.environ["from_modelscope"] = "True"
+        model_args.model_name_or_path = model_args.model_name_or_path.replace(
+            "baidu", "PaddlePaddle"
+        )
+        logger.warning(
+            f"The repo id of baidu's model in the modelscope should be 'PaddlePaddle', model_name_or_path has changed to {model_args.model_name_or_path}"
+        )
+
+    if hasattr(model_args, "from_modelscope"):
+        del model_args.from_modelscope
 
     model_class = Ernie4_5_MoeForCausalLM
     if finetuning_args.pipeline_parallel_degree > 1:
         model_class = Ernie4_5_MoeForCausalLMPipe
-    if model_args.moe_group.lower() in {"data", "dp"} and finetuning_args.data_parallel_degree > 1:
+    if (
+        model_args.moe_group.lower() in {"data", "dp"}
+        and finetuning_args.data_parallel_degree > 1
+    ):
         finetuning_args.use_expert_parallel = True
 
     # fuse_softmax_mask only support for rocm.
@@ -203,7 +255,11 @@ def run_sft(
             )
             model_args.fuse_softmax_mask = False
 
-    check_refined_recompute(finetuning_args.refined_recompute, finetuning_args.sequence_parallel, lora=model_args.lora)
+    check_refined_recompute(
+        finetuning_args.refined_recompute,
+        finetuning_args.sequence_parallel,
+        lora=model_args.lora,
+    )
 
     runtime_timer.start("basemodel loading time")
     if finetuning_args.weight_quantize_algo is not None:
@@ -239,12 +295,16 @@ def run_sft(
                 }
             )
     else:
-        quantization_config = dict(weight_quantize_algo=finetuning_args.weight_quantize_algo)
+        quantization_config = dict(
+            weight_quantize_algo=finetuning_args.weight_quantize_algo
+        )
 
     model_config = Ernie4_5_MoeConfig.from_pretrained(
         model_args.model_name_or_path,
         dtype=dtype,
         quantization_config=quantization_config,
+        from_hf_hub=model_args.from_hf_hub,
+        from_aistudio=model_args.from_aistudio,
     )
     model_config.tensor_parallel_degree = finetuning_args.tensor_parallel_degree
     model_config.tensor_parallel_rank = finetuning_args.tensor_parallel_rank
@@ -277,9 +337,13 @@ def run_sft(
     model_config.moe_orthogonal_loss_lambda = model_args.moe_orthogonal_loss_lambda
     model_config.moe_z_loss_lambda = model_args.moe_z_loss_lambda
     model_config.moe_use_hard_gate = model_args.moe_use_hard_gate
-    model_config.moe_multimodal_dispatch_use_allgather = model_args.moe_multimodal_dispatch_use_allgather
+    model_config.moe_multimodal_dispatch_use_allgather = (
+        model_args.moe_multimodal_dispatch_use_allgather
+    )
     model_config.hidden_dropout_prob = finetuning_args.hidden_dropout_prob
-    model_config.attention_probs_dropout_prob = finetuning_args.attention_probs_dropout_prob
+    model_config.attention_probs_dropout_prob = (
+        finetuning_args.attention_probs_dropout_prob
+    )
     model_config.num_acc_steps = finetuning_args.gradient_accumulation_steps
     model_config.num_nextn_predict_layers = finetuning_args.num_nextn_predict_layers
     model_config.multi_token_pred_lambda = finetuning_args.multi_token_pred_lambda
@@ -287,12 +351,16 @@ def run_sft(
     if model_args.moe_use_aux_free is False:
         model_config.moe_use_aux_free = model_args.moe_use_aux_free
     if model_config.moe_num_experts is None or model_config.moe_num_experts == 0:
-        model_config.moe_group = "dummy" if model_args.moe_group == "mp" else model_args.moe_group
+        model_config.moe_group = (
+            "dummy" if model_args.moe_group == "mp" else model_args.moe_group
+        )
 
     if model_args.continue_training or finetuning_args.weight_quantize_algo is not None:
         model = model_class.from_pretrained(
             model_args.model_name_or_path,
             config=model_config,
+            from_hf_hub=model_args.from_hf_hub,
+            from_aistudio=model_args.from_aistudio,
         )
     else:
         model = model_class.from_config(model_config, dtype=dtype)
@@ -316,6 +384,8 @@ def run_sft(
 
     tokenizer = Ernie4_5_Tokenizer.from_pretrained(
         model_args.model_name_or_path,
+        from_hf_hub=model_args.from_hf_hub,
+        from_aistudio=model_args.from_aistudio,
     )
 
     logger.info("Start to create dataset ...")
@@ -329,9 +399,7 @@ def run_sft(
     from ernie.dataset.finetuning import collate_fn
 
     if data_args.dataset_type == "map":
-        from ernie.dataset.finetuning import (
-            create_indexed_dataset as create_dataset,
-        )
+        from ernie.dataset.finetuning import create_indexed_dataset as create_dataset
     else:
         from ernie.dataset.finetuning import create_dataset
     dataset_config.update(
@@ -369,7 +437,12 @@ def run_sft(
 
     logger.info("Creating dataset successfully ...")
 
-    data_collator = partial(collate_fn, tokenizer=tokenizer, model_args=model_args, max_seq_len=data_args.max_seq_len)
+    data_collator = partial(
+        collate_fn,
+        tokenizer=tokenizer,
+        model_args=model_args,
+        max_seq_len=data_args.max_seq_len,
+    )
 
     if model_args.lora:
         logger.info("Start to wrap model with LoRA config ...")
@@ -387,7 +460,9 @@ def run_sft(
     if finetuning_args.max_steps == -1:
         if finetuning_args.should_load_dataset and paddle.distributed.get_rank() == 0:
             if data_args.dataset_type != "map":
-                finetuning_args.max_steps = estimate_training(train_dataset, data_args, finetuning_args, model_args)
+                finetuning_args.max_steps = estimate_training(
+                    train_dataset, data_args, finetuning_args, model_args
+                )
                 del train_dataset
                 gc.collect()
                 train_dataset = create_dataset(
@@ -402,7 +477,9 @@ def run_sft(
                     * finetuning_args.gradient_accumulation_steps
                     * finetuning_args.dataset_world_size
                 )
-                finetuning_args.max_steps = math.ceil(len(train_dataset) / global_batch_size)
+                finetuning_args.max_steps = math.ceil(
+                    len(train_dataset) / global_batch_size
+                )
 
         if paddle.distributed.get_world_size() > 1:
             paddle.distributed.barrier()
@@ -410,24 +487,37 @@ def run_sft(
             paddle.distributed.broadcast(max_steps, src=0)
             finetuning_args.max_steps = int(max_steps.item())
         if finetuning_args.max_steps <= 0:
-            raise ValueError(f"Invalid max_steps: {finetuning_args.max_steps}. Please check your dataset")
+            raise ValueError(
+                f"Invalid max_steps: {finetuning_args.max_steps}. Please check your dataset"
+            )
 
-        logger.info(f"Re-setting finetuning_args.max_steps to {finetuning_args.max_steps}.")
+        logger.info(
+            f"Re-setting finetuning_args.max_steps to {finetuning_args.max_steps}."
+        )
     # Create the learning_rate sheduler and optimizer
     if finetuning_args.decay_steps is None:
         finetuning_args.decay_steps = finetuning_args.max_steps
 
     if finetuning_args.save_strategy == IntervalStrategy.EPOCH:
         finetuning_args.save_strategy = IntervalStrategy.STEPS
-        finetuning_args.save_steps = int(finetuning_args.max_steps / finetuning_args.num_train_epochs)
+        finetuning_args.save_steps = int(
+            finetuning_args.max_steps / finetuning_args.num_train_epochs
+        )
     if finetuning_args.evaluation_strategy == IntervalStrategy.EPOCH:
         finetuning_args.evaluation_strategy = IntervalStrategy.STEPS
-        finetuning_args.eval_steps = int(finetuning_args.max_steps / finetuning_args.num_train_epochs)
+        finetuning_args.eval_steps = int(
+            finetuning_args.max_steps / finetuning_args.num_train_epochs
+        )
     if finetuning_args.logging_strategy == IntervalStrategy.EPOCH:
         finetuning_args.logging_strategy = IntervalStrategy.STEPS
-        finetuning_args.logging_steps = int(finetuning_args.max_steps / finetuning_args.num_train_epochs)
+        finetuning_args.logging_steps = int(
+            finetuning_args.max_steps / finetuning_args.num_train_epochs
+        )
 
-    if not model_args.use_sparse_head_and_loss_fn and not finetuning_args.prediction_loss_only:
+    if (
+        not model_args.use_sparse_head_and_loss_fn
+        and not finetuning_args.prediction_loss_only
+    ):
         unwraped_model = unwrap_model(model)
         if hasattr(model, "compute_metrics"):
             compute_metrics = model.compute_metrics
@@ -442,8 +532,16 @@ def run_sft(
     trainer = ErnieMoETrainer(
         model=model,
         args=finetuning_args,
-        train_dataset=(train_dataset if finetuning_args.do_train and finetuning_args.should_load_dataset else None),
-        eval_dataset=(eval_dataset if finetuning_args.do_eval and finetuning_args.should_load_dataset else None),
+        train_dataset=(
+            train_dataset
+            if finetuning_args.do_train and finetuning_args.should_load_dataset
+            else None
+        ),
+        eval_dataset=(
+            eval_dataset
+            if finetuning_args.do_eval and finetuning_args.should_load_dataset
+            else None
+        ),
         tokenizer=tokenizer,
         do_generation=False,
         data_args=data_args,
@@ -451,18 +549,25 @@ def run_sft(
         compute_metrics=compute_metrics,
     )
     trainable_parameters = [
-        p for p in model.parameters() if not p.stop_gradient or ("quantization_linear" in p.name and "w_1" in p.name)
+        p
+        for p in model.parameters()
+        if not p.stop_gradient or ("quantization_linear" in p.name and "w_1" in p.name)
     ]
     trainer.set_optimizer_grouped_parameters(trainable_parameters)
 
-    if finetuning_args.hidden_dropout_prob or finetuning_args.attention_probs_dropout_prob:
+    if (
+        finetuning_args.hidden_dropout_prob
+        or finetuning_args.attention_probs_dropout_prob
+    ):
         trainer.add_callback(LayerwiseDropoutCallback())
 
     if finetuning_args.do_train:
         train_result = trainer.train(resume_from_checkpoint=last_checkpoint)
         if not finetuning_args.sft_benchmark:
             runtime_timer.start("model saving time")
-            trainer.save_model(merge_tensor_parallel=finetuning_args.tensor_parallel_degree > 1)
+            trainer.save_model(
+                merge_tensor_parallel=finetuning_args.tensor_parallel_degree > 1
+            )
             if paddle.distributed.get_world_size() > 1:
                 paddle.distributed.barrier()
             logger.info(f"{runtime_timer.log()}")
@@ -487,8 +592,12 @@ def run_sft(
                 finetuning_args, train_dataset, data_args.max_seq_len
             )
 
-            effective_tokens_per_second = total_effective_tokens / train_result.metrics["train_runtime"]
-            total_tokens_per_second = total_tokens / train_result.metrics["train_runtime"]
+            effective_tokens_per_second = (
+                total_effective_tokens / train_result.metrics["train_runtime"]
+            )
+            total_tokens_per_second = (
+                total_tokens / train_result.metrics["train_runtime"]
+            )
             effective_ratio = 100 * total_effective_tokens / total_tokens
             logger.info(
                 "[timelog] {}: {:.2f} % ({}) ".format(

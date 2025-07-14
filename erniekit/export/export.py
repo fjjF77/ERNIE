@@ -13,13 +13,15 @@
 # limitations under the License.
 
 import os
-import time
 import shutil
+import time
 from typing import Any, Optional
 
 import paddle
 from paddleformers.mergekit import MergeConfig, MergeModel
 from paddleformers.trainer import get_last_checkpoint
+from paddleformers.utils.download import resolve_file_path
+from paddleformers.utils.env import SAFE_WEIGHTS_INDEX_NAME, SAFE_WEIGHTS_NAME
 from paddleformers.utils.log import logger
 
 from ..hparams import get_export_args, read_args
@@ -65,10 +67,11 @@ def run_export(args: Optional[dict[str, Any]] = None) -> None:
     """
 
     args = read_args(args)
-    model_args, data_args, generating_args, finetuning_args, export_args = get_export_args(args)
+    model_args, data_args, generating_args, finetuning_args, export_args = (
+        get_export_args(args)
+    )
 
     paddle.set_device(finetuning_args.device)
-    tensor_type = "np" if finetuning_args.device == "cpu" else "pd"
 
     last_checkpoint = None
     if os.path.isdir(finetuning_args.output_dir):
@@ -81,15 +84,52 @@ def run_export(args: Optional[dict[str, Any]] = None) -> None:
     if last_checkpoint is not None:
         logger.info(f"Starting model export from checkpoint: {last_checkpoint}")
     else:
-        raise FileNotFoundError(f"No valid checkpoint found in: {finetuning_args.output_dir}")
+        raise FileNotFoundError(
+            f"No valid checkpoint found in: {finetuning_args.output_dir}"
+        )
 
     if model_args.lora:
         start = time.time()
         logger.info("***** Start merging LoRA model *****")
+
+        is_local = os.path.isfile(model_args.model_name_or_path) or os.path.isdir(
+            model_args.model_name_or_path
+        )
+        if getattr(model_args, "from_aistudio", False):
+            if not is_local and model_args.model_name_or_path.startswith("baidu"):
+                model_args.model_name_or_path = model_args.model_name_or_path.replace(
+                    "baidu", "PaddlePaddle"
+                )
+                logger.warning(
+                    f"The repo id of baidu's model in the aistudio should be 'PaddlePaddle', model_name_or_path has changed to {model_args.model_name_or_path}"
+                )
+        elif getattr(model_args, "from_modelscope", False):
+            os.environ["from_modelscope"] = "True"
+            model_args.model_name_or_path = model_args.model_name_or_path.replace(
+                "baidu", "PaddlePaddle"
+            )
+            logger.warning(
+                f"The repo id of baidu's model in the modelscope should be 'PaddlePaddle', model_name_or_path has changed to {model_args.model_name_or_path}"
+            )
+
+        if hasattr(model_args, "from_modelscope"):
+            del model_args.from_modelscope
+
+        resolve_result = resolve_file_path(
+            model_args.model_name_or_path,
+            [SAFE_WEIGHTS_INDEX_NAME, SAFE_WEIGHTS_NAME],
+            from_hf_hub=True,
+        )
+        if resolve_result is not None:
+            resolve_path = os.path.dirname(resolve_result)
+            logger.info(f"base model path parsed:{resolve_path}")
+        else:
+            logger.error(f"{model_args.model_name_or_path} does not found.")
+
         config = {}
-        config["base_model_path"] = model_args.model_name_or_path
+        config["base_model_path"] = resolve_path
         config["lora_model_path"] = last_checkpoint
-        config["output_path"] = os.path.join(finetuning_args.output_dir, 'export')
+        config["output_path"] = os.path.join(finetuning_args.output_dir, "export")
         if export_args.copy_tokenizer:
             config["copy_file_list"] = [
                 "tokenizer.model",
@@ -107,7 +147,13 @@ def run_export(args: Optional[dict[str, Any]] = None) -> None:
         if os.path.isfile(src_file):
             shutil.copy2(src_file, dst_file)
         else:
-            logger.debug(f'Copy failed: "config.json" not found in {config["base_model_path"]}')
-        logger.info(f"***** Successfully finished merging LoRA model. Time cost: {time.time()-start} s *****")
+            logger.debug(
+                f'Copy failed: "config.json" not found in {config["base_model_path"]}'
+            )
+        logger.info(
+            f"***** Successfully finished merging LoRA model. Time cost: {time.time() - start} s *****"
+        )
     else:
-        raise ValueError("Only support merge lora checkpoint, but get model_args.lora is False.")
+        raise ValueError(
+            "Only support merge lora checkpoint, but get model_args.lora is False."
+        )
